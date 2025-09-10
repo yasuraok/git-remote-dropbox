@@ -75,6 +75,7 @@ class RcloneHelper:
         self.path = path.lstrip("/")
         self._verbosity = Level.INFO
         self._refs: Dict[str, str] = {}
+        self._first_push = True
 
     @property
     def verbosity(self) -> Level:
@@ -128,6 +129,7 @@ class RcloneHelper:
                 _write()
             elif line.startswith("push"):
                 # simplistic: read push lines until blank
+                remote_head = None
                 while True:
                     parts = line.split(" ")[1].split(":")
                     src, dst = parts[0], parts[1]
@@ -135,8 +137,17 @@ class RcloneHelper:
                         self._delete(dst)
                     else:
                         self._push(src, dst)
+                        if self._first_push and (not remote_head or src == git.symbolic_ref_value("HEAD")):
+                            remote_head = dst
                     line = readline()
                     if line == "":
+                        if self._first_push:
+                            self._first_push = False
+                            if remote_head:
+                                if not self.write_symbolic_ref("HEAD", remote_head):
+                                    self._trace("failed to set default branch on remote", Level.INFO)
+                            else:
+                                self._trace("first push but no branch to set remote HEAD")
                         break
                 _write()
             elif line.startswith("fetch"):
