@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -20,23 +22,40 @@ def _run_rclone(args: List[str], input_data: Optional[bytes] = None) -> bytes:
     out, err = proc.communicate(input=input_data)
     # Decode outputs for inspection
     try:
-        sout = out.decode("utf8", errors="replace")
-    except Exception:
-        sout = "<binary>"
-    try:
         serr = err.decode("utf8", errors="replace")
     except Exception:
         serr = "<binary>"
-    # Always print diagnostics for visibility
+    # Print basic diagnostics
     stderr(f"rclone rc={proc.returncode} stdout_len={len(out)} stderr_len={len(err)}\n")
-    if sout:
-        stderr(f"rclone stdout: {sout[:1000]}\n")
     if serr:
         stderr(f"rclone stderr: {serr[:1000]}\n")
     if proc.returncode != 0:
         # Raise with original stderr so callers can inspect content if needed.
         raise RcloneError(serr)
     return out
+
+
+def _run_rclone_print(args: List[str]) -> None:
+    """Run rclone command with real-time stdout/stderr output to console."""
+    cmd = ["rclone", *args]
+    stderr(f"rclone command: {' '.join(cmd)}\n")
+
+    # Use Popen with real-time output
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           universal_newlines=True, bufsize=1)
+
+    # Read and print output in real-time
+    if proc.stdout:
+        for line in proc.stdout:
+            stderr(f"rclone stdout: {line.rstrip()}\n")
+
+    # Wait for completion
+    returncode = proc.wait()
+
+    stderr(f"rclone rc={returncode}\n")
+
+    if returncode != 0:
+        raise RcloneError(f"rclone command failed with exit code {returncode}")
 
 
 class RcloneHelper:
@@ -153,19 +172,56 @@ class RcloneHelper:
         rev = str(int(time.time() * 1000))
         return (rev, content)
 
+    def _batch_copy(self, dst: str, new_sha: str, objects: List[str]) -> None:
+        """Push objects and ref in a single batch operation."""
+        batch_temp_dir = tempfile.mkdtemp(prefix="rclone_batch_")
+        self._trace(f"Started batch operation in {batch_temp_dir}")
 
+        try:
+            # Add all objects to batch
+            for sha in objects:
+                data = git.encode_object(sha)
+                path = self._object_path(sha)
+                full = self._full_remote_path(path)
+                self._trace(f"adding to batch: {full}")
 
-    def _put_object(self, sha: str) -> None:
-        data = git.encode_object(sha)
-        path = self._object_path(sha)
-        full = self._full_remote_path(path)
-        self._trace(f"writing: {full}")
-        # write to temp file then copyto remote
-        with tempfile.NamedTemporaryFile() as tf:
-            tf.write(data)
-            tf.flush()
-            _run_rclone(["copyto", tf.name, full])
-        # Dropboxの実装に倣って検証をスキップ - rcloneの成功を信頼
+                # Create local file path preserving remote structure
+                rel_path = full
+                if rel_path.startswith(self.remote + ":"):
+                    rel_path = rel_path[len(self.remote) + 1:]
+
+                local_path = os.path.join(batch_temp_dir, rel_path)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+                with open(local_path, 'wb') as f:
+                    f.write(data)
+
+            # Add ref file to batch
+            refpath = self._ref_path(dst)
+            refpath_full = self._full_remote_path(refpath)
+            content = f"{new_sha}\n".encode("utf8")
+            self._trace(f"adding ref to batch: {refpath_full}")
+
+            rel_path = refpath_full
+            if rel_path.startswith(self.remote + ":"):
+                rel_path = rel_path[len(self.remote) + 1:]
+
+            local_path = os.path.join(batch_temp_dir, rel_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+            with open(local_path, 'wb') as f:
+                f.write(content)
+
+            # Execute batch copy
+            self._trace(f"Executing batch copy with {len(objects) + 1} files", Level.INFO)
+            remote_base = f"{self.remote}:"
+            _run_rclone_print(["copy", "-v", batch_temp_dir, remote_base])
+            self._trace("Batch copy completed successfully")
+
+        finally:
+            # Clean up temporary directory
+            if os.path.exists(batch_temp_dir):
+                shutil.rmtree(batch_temp_dir)
 
     def _delete(self, ref: str) -> None:
         self._trace(f"deleting ref {ref}")
@@ -228,16 +284,10 @@ class RcloneHelper:
             present = []
 
         objects = git.list_objects(src, present)
-        for sha in objects:
-            self._put_object(sha)
 
-        # write ref file
-        content = f"{new_sha}\n".encode("utf8")
-        full = self._full_remote_path(refpath)
-        with tempfile.NamedTemporaryFile() as tf:
-            tf.write(content)
-            tf.flush()
-            _run_rclone(["copyto", tf.name, full])
+        # Execute batch copy for all objects and ref
+        self._batch_copy(dst, new_sha, objects)
+
         _write(f"ok {dst}")
 
     def get_refs(self, *, for_push: bool) -> List[Tuple[str, str]]:
@@ -291,14 +341,12 @@ class RcloneHelper:
         p = f"{self.path}/{path}"
         full = self._full_remote_path(p)
         content = f"ref: {ref}\n".encode("utf8")
-        with tempfile.NamedTemporaryFile() as tf:
-            tf.write(content)
-            tf.flush()
-            try:
-                _run_rclone(["copyto", tf.name, full])
-            except RcloneError:
-                return False
-        return True
+
+        try:
+            _run_rclone(["rcat", full], input_data=content)
+            return True
+        except RcloneError:
+            return False
 
     def read_symbolic_ref(self, path: str) -> Optional[Tuple[str, str]]:
         p = f"{self.path}/{path}"
