@@ -52,13 +52,21 @@ setup_env() {
     trap cleanup EXIT
 }
 
+# Delete rclone remote directory
+rclone_delete() {
+    local remote="$1"
+    local repo_path="$2"
+    local target="${remote}:${repo_path}"
+    rclone purge "$target"
+}
+
 cleanup() {
     info 'cleaning up'
     if [[ -n "${TMP_DIR}" ]]; then
         rm -rf ${TMP_DIR}
     fi
     if [[ -n "${REPO_DIR}" ]]; then
-        "${BASEDIR}/rclone_delete.sh" "${RCLONE_REMOTE}" "${REPO_DIR}"
+        rclone_delete "${RCLONE_REMOTE}" "${REPO_DIR}"
     fi
 }
 
