@@ -29,6 +29,7 @@ git-dropbox = "git_remote_dropbox.cli.manage:main"
 # Users might have a `git dropbox` alias set up for `git-dropbox-manage`,
 # according to the old instructions. Don't break their config.
 git-dropbox-manage = "git_remote_dropbox.cli.manage:main"
+git-remote-rclone = "git_remote_dropbox.cli.rclone:main"
 
 [project.urls]
 homepage = "https://github.com/anishathalye/git-remote-dropbox"
