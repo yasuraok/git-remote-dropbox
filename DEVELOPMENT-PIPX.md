@@ -26,8 +26,7 @@
    - 必要なら `git-remote-rclone --help` や `git-remote-rclone` を呼んで簡単に動作確認
 
 6. テスト実行
-   - 単体スクリプト: `DEBUG=1 ./tests/test-rclone-incremental.sh`
-   - フルスイート（手元の環境で実行する場合）: `./tests/test-rclone.sh` など
+   - 単体スクリプト: `CI=true DEBUG=1 ./tests/test-rclone.sh` など
    - テストは `set -euo pipefail` を使っているので最初のエラーで止まります。
 
 7. 問題が見つかったらコードを修正し、3〜6 を繰り返す
