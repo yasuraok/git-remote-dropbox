@@ -239,6 +239,57 @@ class RcloneHelper:
             if os.path.exists(batch_temp_dir):
                 shutil.rmtree(batch_temp_dir)
 
+    def _batch_receive(self, shas: List[str]) -> None:
+        """Fetch multiple objects in a single batch operation using --files-from."""
+        if not shas:
+            return
+
+        batch_temp_dir = tempfile.mkdtemp(prefix="rclone_fetch_batch_")
+        self._trace(f"Started batch receive operation in {batch_temp_dir}")
+
+        try:
+            # Create a file list for rclone --files-from
+            files_list_path = os.path.join(batch_temp_dir, "files_list.txt")
+            with open(files_list_path, 'w') as f:
+                for sha in shas:
+                    prefix = sha[:2]
+                    suffix = sha[2:]
+                    # Write relative path from objects directory
+                    f.write(f"{prefix}/{suffix}\n")
+            
+            # Create remote source directory for objects
+            remote_objects_path = f"{self.remote}:{self.path}/objects"
+            local_objects_dir = os.path.join(batch_temp_dir, "objects")
+            
+            # Use rclone copy with --files-from to fetch only needed objects
+            self._trace(f"Fetching {len(shas)} objects in batch using --files-from", Level.INFO)
+            _run_rclone_print(["copy", "-v", "--files-from", files_list_path, 
+                              remote_objects_path, local_objects_dir])
+            
+            # Verify and decode all objects (decode_object automatically writes to git repo)
+            for sha in shas:
+                prefix = sha[:2]
+                suffix = sha[2:]
+                local_object_path = os.path.join(local_objects_dir, prefix, suffix)
+                
+                if not os.path.exists(local_object_path):
+                    raise RuntimeError(f"Object {sha} not found after batch fetch")
+                
+                # Read and verify the object
+                with open(local_object_path, 'rb') as f:
+                    data = f.read()
+                
+                computed = git.decode_object(data)
+                if computed != sha:
+                    raise RuntimeError(f"hash mismatch for {sha}")
+                
+            self._trace("Batch receive completed successfully")
+            
+        finally:
+            # Clean up temporary directory
+            if os.path.exists(batch_temp_dir):
+                shutil.rmtree(batch_temp_dir)
+
     def _delete(self, ref: str) -> None:
         self._trace(f"deleting ref {ref}")
         path = self._ref_path(ref)
@@ -379,24 +430,39 @@ class RcloneHelper:
         return (rev, ref)
 
     def _fetch(self, sha: str, _seen: Optional[set] = None) -> None:
-        # Recursively fetch the given object and any objects it references.
+        # Use breadth-first search to minimize recursion depth and batch operations
         if _seen is None:
             _seen = set()
         if sha in _seen:
             return
+        
+        # Use a queue to process objects level by level
+        queue = [sha]
         _seen.add(sha)
-        path = self._object_path(sha)
-        _, data = self._get_file(path)
-        computed = git.decode_object(data)
-        if computed != sha:
-            raise RuntimeError("hash mismatch")
-        # Fetch objects referenced by this object (trees -> blobs/trees, commits -> tree/parents, tags -> target)
-        try:
-            refs = git.referenced_objects(sha)
-        except Exception:
-            refs = []
-        for r in refs:
-            self._fetch(r, _seen)
+        
+        while queue:
+            # Collect all objects at current level
+            current_level = queue[:]
+            queue.clear()
+            
+            # Batch fetch all objects in current level
+            self._batch_receive(current_level)
+            
+            # Collect references for next level
+            next_level = []
+            for obj_sha in current_level:
+                try:
+                    refs = git.referenced_objects(obj_sha)
+                    for ref in refs:
+                        if ref not in _seen:
+                            next_level.append(ref)
+                            _seen.add(ref)
+                except Exception:
+                    # If we can't determine references, skip
+                    pass
+            
+            # Add next level to queue
+            queue.extend(next_level)
 
 
 def _write(message: Optional[str] = None) -> None:
